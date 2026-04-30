@@ -62,6 +62,7 @@ An all-in-one appointment booking & management system for Israeli barbershops. C
 - **Monitoring:** Sentry (error tracking) + Google Analytics (usage)
 - **Backup:** Firebase automated backups (daily, 30-day retention)
 - **Security:** Firestore rules, CORS, rate limiting, input validation
+- **Admin Alerts:** Telegram Bot (real-time alerts, daily reports, commands)
 
 ---
 
@@ -168,7 +169,47 @@ vercel deploy --prod
 # Or use Docker
 docker build -t barber-agent .
 docker run -p 3000:3000 -p 5173:5173 barber-agent
+
+# Deploy Cloud Functions + Telegram Bot
+firebase deploy --only functions
+bash scripts/setup-telegram-webhook.sh
 ```
+
+---
+
+## 📲 **Telegram Bot (Admin Monitoring)**
+
+Real-time alerts, daily reports, and admin commands via Telegram.
+
+### Features
+- 📊 **Daily Reports** (6 AM): Customer count, revenue, appointment metrics
+- 🎉 **New Customer Alert**: Instant notification when shop signs up
+- 🚨 **Churn Risk Alert**: Alerts when customer health drops
+- 💬 **WhatsApp Message Forwarding**: Forward customer messages to admin
+- 🔔 **Custom Commands**: `/status`, `/customers`, `/revenue`, `/health`, `/topshops`
+
+### Setup
+
+```bash
+# 1. Create bot with @BotFather on Telegram
+# 2. Get your chat ID from @userinfobot
+# 3. Set environment variables
+export TELEGRAM_BOT_TOKEN="your_bot_token"
+export TELEGRAM_ADMIN_CHAT_ID="your_chat_id"
+
+# 4. Deploy
+firebase deploy --only functions
+
+# 5. Set webhook
+bash scripts/setup-telegram-webhook.sh
+
+# 6. Test in Telegram
+/status  # See system status
+/report  # Get daily report
+/customers  # List all shops
+```
+
+**Full Setup Guide:** `docs/TELEGRAM_BOT_SETUP.md`
 
 ---
 
