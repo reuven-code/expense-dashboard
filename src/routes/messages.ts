@@ -1,11 +1,11 @@
 import { Router, Request, Response } from 'express';
 import { Firestore } from 'firebase-admin/firestore';
 import { logger } from '../utils/logger';
-import { validateMessageInput, validatePhoneNumber, sanitizeObject } from '../utils/validation';
-import { OperationalError } from '../middleware/errorHandler';
-import axios from 'axios';
+import { validatePhoneNumber, sanitizeInput } from '../utils/validation';
+import { messageRouter as messageRouterService } from '../services/messageRouter';
+import { whatsappClient } from '../services/whatsappClient';
 
-export const messageRouter = (db: Firestore) => {
+export const messagesRouter = (db: Firestore) => {
   const router = Router();
 
   // ============ GET WEBHOOK VERIFICATION (WhatsApp) ============
@@ -31,49 +31,46 @@ export const messageRouter = (db: Firestore) => {
     try {
       const body = req.body;
 
-      // Acknowledge receipt immediately
+      // Acknowledge receipt immediately (WhatsApp requirement)
       res.status(200).json({ received: true });
 
       // Parse WhatsApp message
       const messages = body.entry?.[0]?.changes?.[0]?.value?.messages;
       if (!messages || messages.length === 0) {
-        return; // No messages to process
+        return;
       }
 
       const message = messages[0];
       const phoneNumber = message.from;
-      const messageId = message.id;
       const businessAccountId = body.entry?.[0]?.changes?.[0]?.value?.metadata?.phone_number_id;
-      const timestamp = message.timestamp;
+      const messageId = message.id;
 
-      // Layer 1: Validate phone number
+      // Validate phone number
       const phoneValidation = validatePhoneNumber(phoneNumber);
       if (!phoneValidation.valid) {
         logger.warn(`Invalid phone number: ${phoneNumber}`);
         return;
       }
 
-      // Extract message text (Layer 1 validation)
+      // Extract message text
       let messageText = '';
       if (message.type === 'text') {
         messageText = message.text.body;
       } else {
-        // For non-text messages, send a response
-        await sendWhatsAppMessage(phoneNumber, 'אנא שלח הודעה טקסטואלית');
+        logger.debug(`Ignoring non-text message`, { type: message.type, from: phoneNumber });
         return;
       }
 
-      // Layer 2: Validate message input
-      const inputValidation = validateMessageInput(messageText);
-      if (!inputValidation.valid) {
-        logger.warn(`Invalid message input: ${inputValidation.error}`);
-        await sendWhatsAppMessage(phoneNumber, inputValidation.error || 'קלט לא תקין');
+      // Validate message input
+      if (!sanitizeInput(messageText)) {
+        logger.warn(`Invalid or suspicious message input`, { from: phoneNumber });
         return;
       }
 
-      // Find business by WhatsApp account ID
-      const businessSnapshot = await db.collection('businesses')
-        .where('whatsappAccountId', '==', businessAccountId)
+      // Find business by WhatsApp phone number ID
+      const businessSnapshot = await db
+        .collection('businesses')
+        .where('whatsappPhoneNumberId', '==', businessAccountId)
         .limit(1)
         .get();
 
@@ -82,117 +79,73 @@ export const messageRouter = (db: Firestore) => {
         return;
       }
 
-      const businessDoc = businessSnapshot.docs[0];
-      const businessId = businessDoc.id;
+      const businessId = businessSnapshot.docs[0].id;
 
-      // Get or create customer
-      const customerRef = db.collection('businesses')
+      // Get or create customer record
+      const customerRef = db
+        .collection('businesses')
         .doc(businessId)
-        .collection('users')
+        .collection('customers')
         .doc(phoneNumber);
 
-      let customer = await customerRef.get();
-      if (!customer.exists) {
+      const customerDoc = await customerRef.get();
+      if (!customerDoc.exists) {
         await customerRef.set({
-          phoneNumber: phoneNumber,
-          whatsappId: phoneNumber,
-          firstContact: new Date(),
-          lastContact: new Date(),
-          appointmentCount: 0,
-          metadata: { language: 'he', timezone: 'Asia/Jerusalem' }
+          phone: phoneNumber,
+          created_at: new Date(),
+          last_contact: new Date(),
+          message_count: 1,
         });
       } else {
-        await customerRef.update({ lastContact: new Date() });
+        // Update last contact
+        await customerRef.update({
+          last_contact: new Date(),
+          message_count: (customerDoc.data()?.message_count || 0) + 1,
+        });
       }
 
-      // Call AI Agent to process message
-      const aiResponse = await processMessageWithAI(
-        messageText,
-        businessId,
-        phoneNumber,
-        db
-      );
+      // Mark message as read (fire-and-forget)
+      whatsappClient.markAsRead(messageId).catch((err) => {
+        logger.debug('Failed to mark message as read', { messageId, error: err });
+      });
 
-      // Send response back to customer
-      await sendWhatsAppMessage(phoneNumber, aiResponse);
-
-      // Log the interaction
-      await db.collection('businesses')
-        .doc(businessId)
-        .collection('auditLogs')
-        .add({
-          action: 'message_received',
-          userId: phoneNumber,
-          details: { messageId, text: messageText.substring(0, 100) },
-          timestamp: new Date(),
-          severity: 'info'
+      // Route message to service handler
+      try {
+        const response = await messageRouterService.handleIncomingMessage({
+          from: phoneNumber,
+          business_id: businessId,
+          message_text: messageText,
+          received_at: new Date(),
         });
 
+        logger.info('Message processed successfully', {
+          businessId,
+          from: phoneNumber,
+          intent: response.intent,
+          action: response.action_taken,
+        });
+      } catch (handlerError) {
+        logger.error('Message handler error', {
+          businessId,
+          from: phoneNumber,
+          error: handlerError,
+        });
+
+        // Send fallback message to customer
+        try {
+          await whatsappClient.sendMessage(
+            phoneNumber,
+            'סוהה חברה, קרתה בעיה טכנית. בואו נשלח הודעה ישירה ⚙️'
+          );
+        } catch (sendError) {
+          logger.error('Failed to send fallback message', { from: phoneNumber, error: sendError });
+        }
+      }
     } catch (error) {
-      logger.error('Error processing WhatsApp message', { error });
+      logger.error('Webhook processing failed', { error });
+      // Still return 200 to prevent WhatsApp from retrying
     }
   });
 
   return router;
 };
-
-// ============ AI PROCESSING ============
-async function processMessageWithAI(
-  messageText: string,
-  businessId: string,
-  phoneNumber: string,
-  db: Firestore
-): Promise<string> {
-  try {
-    // Get business config
-    const businessDoc = await db.collection('businesses').doc(businessId).get();
-    const business = businessDoc.data();
-    if (!business) {
-      return 'אירעה שגיאה. אנא נסה שוב מאוחר יותר.';
-    }
-
-    const aiModel = business.aiModel || process.env.AI_MODEL || 'gemini-1.5-flash';
-    const apiKey = aiModel.includes('gemini') 
-      ? process.env.GEMINI_API_KEY 
-      : process.env.CLAUDE_API_KEY;
-
-    if (!apiKey) {
-      logger.error(`AI API key not configured for model: ${aiModel}`);
-      return 'אירעה שגיאה בתהליך ההזמנה. אנא נסה שוב.';
-    }
-
-    // TODO: Integrate with actual AI API
-    // For now, return a placeholder response
-    const response = 'תודה על ההודעה. אנא בחר תור זמין מהרשימה הבאה.';
-
-    return response;
-
-  } catch (error) {
-    logger.error('Error in AI processing', { error });
-    return 'אירעה שגיאה בעיבוד ההודעה. אנא נסה שוב.';
-  }
-}
-
-// ============ SEND MESSAGE TO CUSTOMER ============
-async function sendWhatsAppMessage(phoneNumber: string, messageText: string): Promise<void> {
-  try {
-    const apiUrl = `${process.env.WHATSAPP_API_URL}/me/messages`;
-    const headers = {
-      Authorization: `Bearer ${process.env.WHATSAPP_API_TOKEN}`,
-      'Content-Type': 'application/json'
-    };
-
-    const payload = {
-      messaging_product: 'whatsapp',
-      to: phoneNumber,
-      type: 'text',
-      text: { body: messageText }
-    };
-
-    await axios.post(apiUrl, payload, { headers });
-    logger.info(`Message sent to ${phoneNumber}`);
-
-  } catch (error) {
-    logger.error(`Failed to send WhatsApp message to ${phoneNumber}`, { error });
-  }
-}
