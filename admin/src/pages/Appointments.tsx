@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useAppointmentStore } from '../stores/appointmentStore';
 import { useLanguage } from '../contexts/LanguageContext';
 import { apiClient } from '../services/apiClient';
+import { CreateAppointmentModal } from '../components/CreateAppointmentModal';
 import { format } from 'date-fns';
 import { he } from 'date-fns/locale';
 
@@ -12,6 +13,7 @@ export function AppointmentsList() {
 
   const [businessId] = useState('default-business'); // TODO: Get from auth
   const [dateFilter, setDateFilter] = useState('');
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
 
   useEffect(() => {
     const fetchAppointments = async () => {
@@ -53,12 +55,8 @@ export function AppointmentsList() {
     }
   };
 
-  if (loading) {
+  if (loading && filteredAppointments.length === 0) {
     return <div className="p-8 text-center text-gray-500">{t('message.loading')}</div>;
-  }
-
-  if (error) {
-    return <div className="p-8 text-center text-red-500">{error}</div>;
   }
 
   return (
@@ -66,7 +64,10 @@ export function AppointmentsList() {
       {/* Header */}
       <div className="flex justify-between items-center">
         <h1 className="text-3xl font-bold text-gray-900">{t('nav.appointments')}</h1>
-        <button className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">
+        <button
+          onClick={() => setIsCreateModalOpen(true)}
+          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition"
+        >
           {t('button.create')}
         </button>
       </div>
@@ -86,6 +87,12 @@ export function AppointmentsList() {
           {t('button.cancel')}
         </button>
       </div>
+
+      {error && (
+        <div className="p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
+          {error}
+        </div>
+      )}
 
       {/* Table */}
       {filteredAppointments.length === 0 ? (
@@ -133,6 +140,17 @@ export function AppointmentsList() {
           </table>
         </div>
       )}
+
+      {/* Create Appointment Modal */}
+      <CreateAppointmentModal
+        isOpen={isCreateModalOpen}
+        onClose={() => setIsCreateModalOpen(false)}
+        businessId={businessId}
+        onSuccess={() => {
+          // Refresh appointments
+          setDateFilter('');
+        }}
+      />
     </div>
   );
 }
