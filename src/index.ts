@@ -5,10 +5,9 @@ import dotenv from 'dotenv';
 import rateLimit from 'express-rate-limit';
 import * as admin from 'firebase-admin';
 import { logger } from './utils/logger';
-import { messageRouter } from './routes/messages';
-import { appointmentRouter } from './routes/appointments';
-import { businessRouter } from './routes/businesses';
-import { adminRouter } from './routes/admin';
+import { messagesRouter } from './routes/messages';
+import { appointmentsRouter } from './routes/appointments';
+import { availabilityRouter } from './routes/availability';
 import { errorHandler } from './middleware/errorHandler';
 
 dotenv.config();
@@ -21,13 +20,13 @@ const PORT = process.env.PORT || 3000;
 // Security
 app.use(helmet());
 app.use(cors({
-  origin: process.env.NODE_ENV === 'production' 
-    ? ['https://admin.barber-agent.co.il', 'https://your-domain.vercel.app']
+  origin: process.env.NODE_ENV === 'production'
+    ? ['https://admin.barber-agent.co.il']
     : '*',
   credentials: true
 }));
 
-// Rate Limiting (10 requests per hour per IP)
+// Rate Limiting (10 requests per hour per IP for messages)
 const limiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
   max: 10,
@@ -35,7 +34,6 @@ const limiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 });
-app.use('/api/messages', limiter);
 
 // Body Parser
 app.use(express.json({ limit: '10kb' }));
@@ -43,9 +41,10 @@ app.use(express.urlencoded({ limit: '10kb', extended: true }));
 
 // Logging Middleware
 app.use((req: Request, res: Response, next: NextFunction) => {
-  logger.info(`${req.method} ${req.path}`, {
+  logger.debug(`${req.method} ${req.path}`, {
     ip: req.ip,
-    userAgent: req.get('user-agent')
+    userAgent: req.get('user-agent'),
+    body: req.method !== 'GET' ? req.body : undefined,
   });
   next();
 });
@@ -68,16 +67,13 @@ app.get('/health', (req: Request, res: Response) => {
 });
 
 // WhatsApp Webhook Routes
-app.use('/api/messages', messageRouter(db));
+app.use('/api/messages', limiter, messagesRouter(db));
 
-// Appointment Routes (Protected)
-app.use('/api/appointments', appointmentRouter(db));
+// Appointment Routes
+app.use('/api/appointments', appointmentsRouter(db));
 
-// Business Routes (Protected)
-app.use('/api/businesses', businessRouter(db));
-
-// Admin Routes (Protected)
-app.use('/api/admin', adminRouter(db));
+// Availability Routes
+app.use('/api/availability', availabilityRouter);
 
 // ============ ERROR HANDLING ============
 
@@ -87,15 +83,24 @@ app.use(errorHandler);
 app.use((req: Request, res: Response) => {
   res.status(404).json({
     error: 'Not Found',
-    message: `Route ${req.path} not found`
+    message: `Route ${req.path} not found`,
   });
 });
 
 // ============ SERVER START ============
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   logger.info(`🚀 Barber Agent Backend started on port ${PORT}`);
   logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  logger.info('SIGTERM received, shutting down gracefully...');
+  server.close(() => {
+    logger.info('Server closed');
+    process.exit(0);
+  });
 });
 
 export default app;
